@@ -1,177 +1,191 @@
-// server.js — كودسيبر
-const path = require("path");
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const engine = require("./gameEngine");
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const path = require('path');
+const fs = require('fs');
+const GameEngine = require('./gameEngine');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
-
-app.use(express.static(path.join(__dirname, "public")));
-
-const rooms = {};
-const timers = {}; // roomId -> Timeout (لتشغيل نهاية الدور تلقائيًا عند انتهاء المؤقت)
-
-function genRoomId() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let id;
-  do {
-    id = Array.from({ length: 5 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-  } while (rooms[id]);
-  return id;
-}
-
-function clearRoomTimer(roomId) {
-  if (timers[roomId]) {
-    clearTimeout(timers[roomId]);
-    delete timers[roomId];
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST']
   }
-}
-
-function scheduleRoomTimer(roomId) {
-  clearRoomTimer(roomId);
-  const room = rooms[roomId];
-  if (!room || !room.turnDeadline || room.phase !== "playing") return;
-  const delay = Math.max(0, room.turnDeadline - Date.now());
-  timers[roomId] = setTimeout(() => {
-    const r = rooms[roomId];
-    if (!r || r.phase !== "playing") return;
-    engine.endTurn(r, null, true);
-    broadcastRoom(roomId);
-    scheduleRoomTimer(roomId); // يجدول مؤقت الدور التالي تلقائيًا
-  }, delay);
-}
-
-function broadcastRoom(roomId) {
-  const room = rooms[roomId];
-  if (!room) return;
-  for (const socketId of Object.keys(room.players)) {
-    const sock = io.sockets.sockets.get(socketId);
-    if (sock) sock.emit("roomState", engine.getViewForSocket(room, socketId));
-  }
-}
-
-io.on("connection", (socket) => {
-  socket.on("createRoom", ({ name }, cb) => {
-    const roomId = genRoomId();
-    const room = engine.createRoom(roomId, socket.id, name || "لاعب");
-    rooms[roomId] = room;
-    socket.join(roomId);
-    socket.data.roomId = roomId;
-    cb && cb({ ok: true, roomId, token: room.hostToken });
-    broadcastRoom(roomId);
-  });
-
-  socket.on("joinRoom", ({ roomId, name, token }, cb) => {
-    const room = rooms[roomId];
-    if (!room) return cb && cb({ error: "الغرفة غير موجودة" });
-    const res = engine.joinRoom(room, socket.id, name, token);
-    socket.join(roomId);
-    socket.data.roomId = roomId;
-    cb && cb({ ok: true, roomId, token: res.token, rejoined: !!res.rejoined });
-    broadcastRoom(roomId);
-    if (room.turnDeadline) scheduleRoomTimer(roomId); // لو المؤقت شغال، نتأكد الجدولة مستمرة
-  });
-
-  socket.on("setTeamRole", ({ team, role }, cb) => {
-    const room = rooms[socket.data.roomId];
-    if (!room) return cb && cb({ error: "لست داخل غرفة" });
-    const res = engine.setTeamRole(room, socket.id, team, role);
-    cb && cb(res);
-    if (res.ok) broadcastRoom(room.id);
-  });
-
-  socket.on("updateSettings", (settings, cb) => {
-    const room = rooms[socket.data.roomId];
-    if (!room) return cb && cb({ error: "لست داخل غرفة" });
-    const res = engine.updateSettings(room, socket.id, settings);
-    cb && cb(res);
-    if (res.ok) broadcastRoom(room.id);
-  });
-
-  socket.on("startGame", (_, cb) => {
-    const room = rooms[socket.data.roomId];
-    if (!room) return cb && cb({ error: "لست داخل غرفة" });
-    const res = engine.startGame(room, socket.id);
-    cb && cb(res);
-    if (res.ok) {
-      broadcastRoom(room.id);
-      scheduleRoomTimer(room.id);
-    }
-  });
-
-  socket.on("rematch", ({ mode }, cb) => {
-    const room = rooms[socket.data.roomId];
-    if (!room) return cb && cb({ error: "لست داخل غرفة" });
-    const res = engine.rematch(room, socket.id, mode);
-    cb && cb(res);
-    if (res.ok) {
-      broadcastRoom(room.id);
-      if (room.phase === "playing") scheduleRoomTimer(room.id);
-      else clearRoomTimer(room.id);
-    }
-  });
-
-  socket.on("giveClue", ({ word, count }, cb) => {
-    const room = rooms[socket.data.roomId];
-    if (!room) return cb && cb({ error: "لست داخل غرفة" });
-    const res = engine.giveClue(room, socket.id, word, count);
-    cb && cb(res);
-    if (res.ok) broadcastRoom(room.id);
-    // ملاحظة: لا نعيد جدولة المؤقت هنا عمدًا - المؤقت يغطي التلميح
-    // والتخمين معًا ضمن نفس الدور (كما طلب المستخدم)، فلا يُعاد تصفيره.
-  });
-
-  socket.on("revealWord", ({ index }, cb) => {
-    const room = rooms[socket.data.roomId];
-    if (!room) return cb && cb({ error: "لست داخل غرفة" });
-    const res = engine.revealWord(room, socket.id, index);
-    cb && cb(res);
-    if (res.ok) {
-      broadcastRoom(room.id);
-      scheduleRoomTimer(room.id); // إن انتهى الدور ضمنيًا هنا، نعيد جدولة مؤقت الدور الجديد
-    }
-  });
-
-  socket.on("endTurn", (_, cb) => {
-    const room = rooms[socket.data.roomId];
-    if (!room) return cb && cb({ error: "لست داخل غرفة" });
-    const res = engine.endTurn(room, socket.id, false);
-    cb && cb(res);
-    if (res.ok) {
-      broadcastRoom(room.id);
-      scheduleRoomTimer(room.id);
-    }
-  });
-
-  socket.on("reaction", ({ emoji }) => {
-    const room = rooms[socket.data.roomId];
-    if (!room) return;
-    engine.addReaction(room, socket.id, emoji);
-    broadcastRoom(room.id);
-  });
-
-  socket.on("disconnect", () => {
-    const roomId = socket.data.roomId;
-    const room = rooms[roomId];
-    if (!room) return;
-    if (room.players[socket.id]) room.players[socket.id].connected = false;
-    broadcastRoom(roomId);
-    setTimeout(() => {
-      const r = rooms[roomId];
-      if (!r) return;
-      const anyConnected = Object.values(r.players).some((p) => p.connected);
-      if (!anyConnected) {
-        clearRoomTimer(roomId);
-        delete rooms[roomId];
-      }
-    }, 5 * 60 * 1000);
-  });
 });
 
 const PORT = process.env.PORT || 3000;
+
+// إعداد خادم الملفات الثابتة من مجلد public
+app.use(express.static(path.join(__dirname, 'public')));
+
+// تحميل بنك الكلمات من ملف words-bank.json
+let wordBank = [];
+try {
+  const wordsData = fs.readFileSync(path.join(__dirname, 'words-bank.json'), 'utf8');
+  wordBank = JSON.parse(wordsData);
+  console.log(`[WordBank] Successfully loaded ${wordBank.length} words.`);
+} catch (error) {
+  console.error('[WordBank Error] Failed to load words-bank.json:', error.message);
+  wordBank = ["شمس", "قمر", "نجم", "بحر", "جبل", "شجرة", "نهر", "سماء", "أرض", "سحاب", "ورق", "قلم", "كتاب", "سيف", "درع", "تاج", "ملك", "قلعة", "ذهب", "فضة", "حديد", "نار", "ماء", "هواء", "تراب"];
+}
+
+// تخزين حالات الغرف النشطة
+const rooms = {};
+
+// إدارة اتصالات Socket.io
+io.on('connection', (socket) => {
+  console.log(`[Socket] New connection: ${socket.id}`);
+
+  // إنشاء غرفة جديدة أو الانضمام لغرفة قائمة
+  socket.on('joinRoom', ({ roomId, playerName, role, team }) => {
+    if (!roomId || !playerName) {
+      return socket.emit('errorMsg', 'يرجى تقديم اسم اللاعب ورمز الغرفة بشكل صحيح.');
+    }
+
+    const cleanRoomId = roomId.trim().toUpperCase();
+    socket.join(cleanRoomId);
+
+    // إذا لم تكن الغرفة موجودة، قم بإنشائها
+    if (!rooms[cleanRoomId]) {
+      rooms[cleanRoomId] = new GameEngine(cleanRoomId, wordBank);
+      console.log(`[Room Created] Room ID: ${cleanRoomId}`);
+    }
+
+    const game = rooms[cleanRoomId];
+    const player = game.addPlayer(socket.id, playerName, team || 'red', role || 'operative');
+
+    socket.data.roomId = cleanRoomId;
+    socket.data.playerId = socket.id;
+
+    // إرسال حالة الغرفة المحدثة للجميع
+    io.to(cleanRoomId).emit('roomState', game.getPublicState(socket.id));
+    console.log(`[Player Joined] ${playerName} joined room ${cleanRoomId}`);
+  });
+
+  // تغيير فريق أو دور اللاعب
+  socket.on('updateRole', ({ team, role }) => {
+    const roomId = socket.data.roomId;
+    if (!roomId || !rooms[roomId]) return;
+
+    const game = rooms[roomId];
+    game.updatePlayerRole(socket.id, team, role);
+    
+    // إعادة إرسال الحالة المحدثة لجميع أفراد الغرفة
+    const roomSockets = io.sockets.adapter.rooms.get(roomId);
+    if (roomSockets) {
+      for (const sId of roomSockets) {
+        const clientSocket = io.sockets.sockets.get(sId);
+        if (clientSocket) {
+          clientSocket.emit('roomState', game.getPublicState(sId));
+        }
+      }
+    }
+  });
+
+  // تقديم تلميح من قبل رئيس الجواسيس
+  socket.on('giveClue', ({ word, count }) => {
+    const roomId = socket.data.roomId;
+    if (!roomId || !rooms[roomId]) return;
+
+    const game = rooms[roomId];
+    const result = game.submitClue(socket.id, word, count);
+
+    if (result.error) {
+      return socket.emit('errorMsg', result.error);
+    }
+
+    broadcastRoomState(roomId);
+  });
+
+  // كشف/تخمين كلمة
+  socket.on('revealCard', ({ cardIndex }) => {
+    const roomId = socket.data.roomId;
+    if (!roomId || !rooms[roomId]) return;
+
+    const game = rooms[roomId];
+    const result = game.revealCard(socket.id, cardIndex);
+
+    if (result.error) {
+      return socket.emit('errorMsg', result.error);
+    }
+
+    // بث التفاعل الحي عند كشف الكلمة
+    if (result.card) {
+      io.to(roomId).emit('emojiReaction', {
+        cardIndex,
+        emoji: result.isCorrect ? '🔥' : (result.isAssassin ? '💀' : '🤦‍♂️')
+      });
+    }
+
+    broadcastRoomState(roomId);
+  });
+
+  // إنهاء الدور اختيارياً
+  socket.on('endTurn', () => {
+    const roomId = socket.data.roomId;
+    if (!roomId || !rooms[roomId]) return;
+
+    const game = rooms[roomId];
+    game.endTurn(socket.id);
+    broadcastRoomState(roomId);
+  });
+
+  // إرسال تفاعل إيموجي يدوي
+  socket.on('sendReaction', ({ cardIndex, emoji }) => {
+    const roomId = socket.data.roomId;
+    if (!roomId) return;
+    io.to(roomId).emit('emojiReaction', { cardIndex, emoji });
+  });
+
+  // إعادة بدء اللعبة
+  socket.on('restartGame', () => {
+    const roomId = socket.data.roomId;
+    if (!roomId || !rooms[roomId]) return;
+
+    const game = rooms[roomId];
+    game.restart(wordBank);
+    broadcastRoomState(roomId);
+  });
+
+  // عند قطع الاتصال
+  socket.on('disconnect', () => {
+    const roomId = socket.data.roomId;
+    if (roomId && rooms[roomId]) {
+      const game = rooms[roomId];
+      game.removePlayer(socket.id);
+
+      // إذا أصبحت الغرفة فارغة، قم بحذفها لتوفير الذاكرة
+      if (Object.keys(game.players).length === 0) {
+        delete rooms[roomId];
+        console.log(`[Room Deleted] Room ID: ${roomId} is empty.`);
+      } else {
+        broadcastRoomState(roomId);
+      }
+    }
+    console.log(`[Socket] Disconnected: ${socket.id}`);
+  });
+});
+
+// دالة مسبورة لبث حالة الغرفة المخصصة لكل شخص حسب دوره
+function broadcastRoomState(roomId) {
+  const game = rooms[roomId];
+  if (!game) return;
+
+  const roomSockets = io.sockets.adapter.rooms.get(roomId);
+  if (roomSockets) {
+    for (const sId of roomSockets) {
+      const clientSocket = io.sockets.sockets.get(sId);
+      if (clientSocket) {
+        clientSocket.emit('roomState', game.getPublicState(sId));
+      }
+    }
+  }
+}
+
+// تشغيل الخادم
 server.listen(PORT, () => {
-  console.log(`كودسيبر يعمل على http://localhost:${PORT}`);
+  console.log(`========================================`);
+  console.log(`[Server Running] http://localhost:${PORT}`);
+  console.log(`========================================`);
 });
