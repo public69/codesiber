@@ -3,7 +3,7 @@ const socket = io();
 let myName = "";
 let currentRoomId = null;
 let lastState = null;
-let myPendingTeam = null, myPendingRole = null; // آخر اختيار محلي (لتلوين الأزرار قبل وصول التحديث)
+let myPendingTeam = null, myPendingRole = null;
 let selectedCategory = "beginner";
 let selectedTimer = "none";
 let timerInterval = null;
@@ -12,11 +12,12 @@ const $ = (id) => document.getElementById(id);
 
 function show(sectionId) {
   ["landing", "lobby", "game", "ended"].forEach((id) => {
-    $(id).classList.toggle("hidden", id !== sectionId);
+    const el = $(id);
+    if (el) el.classList.toggle("hidden", id !== sectionId);
   });
 }
 
-// ---------- استعادة الجلسة عبر localStorage (إعادة الاتصال التلقائي) ----------
+// ---------- استعادة الجلسة عبر localStorage ----------
 function saveSession(roomId, token, name) {
   try {
     localStorage.setItem("codesiber_session", JSON.stringify({ roomId, token, name }));
@@ -33,70 +34,112 @@ function clearSession() {
   try { localStorage.removeItem("codesiber_session"); } catch (e) {}
 }
 
-// ---------- رابط مباشر Deep Link: ?room=XXXXX ----------
+// ---------- رابط مباشر Deep Link ----------
 (function applyDeepLink() {
   const params = new URLSearchParams(location.search);
   const rid = params.get("room");
-  if (rid) $("roomInput").value = rid.toUpperCase();
+  if (rid && $("roomInput")) $("roomInput").value = rid.toUpperCase();
 })();
 
-// ---------- محاولة إعادة الاتصال التلقائي عند التحميل ----------
+// ---------- محاولة إعادة الاتصال التلقائي ----------
 (function tryAutoReconnect() {
   const session = loadSession();
   if (!session) return;
   myName = session.name;
-  socket.emit("joinRoom", { roomId: session.roomId, name: session.name, token: session.token }, (res) => {
-    if (res.error) { clearSession(); return; }
+  socket.emit("joinRoom", { roomId: session.roomId, playerName: session.name, name: session.name, token: session.token }, (res) => {
+    if (res && res.error) { clearSession(); return; }
     currentRoomId = session.roomId;
-    saveSession(session.roomId, res.token, session.name);
-    $("landing").classList.add("hidden");
-    $("roomBadge").classList.remove("hidden");
-    $("roomBadge").textContent = currentRoomId;
+    if (res && res.token) saveSession(session.roomId, res.token, session.name);
+    if ($("landing")) $("landing").classList.add("hidden");
+    if ($("roomBadge")) {
+      $("roomBadge").classList.remove("hidden");
+      $("roomBadge").textContent = currentRoomId;
+    }
   });
 })();
 
 // ---------- شاشة الدخول ----------
-$("createBtn").onclick = () => {
-  myName = $("nameInput").value.trim() || "لاعب";
-  socket.emit("createRoom", { name: myName }, (res) => {
-    if (res.error) return ($("landingError").textContent = res.error);
-    currentRoomId = res.roomId;
-    saveSession(res.roomId, res.token, myName);
-    $("roomBadge").classList.remove("hidden");
-    $("roomBadge").textContent = currentRoomId;
-  });
-};
+if ($("createBtn")) {
+  $("createBtn").onclick = () => {
+    myName = ($("nameInput") ? $("nameInput").value.trim() : "") || "لاعب";
+    socket.emit("createRoom", { playerName: myName, name: myName }, (res) => {
+      if (res && res.error) {
+        if ($("landingError")) $("landingError").textContent = res.error;
+        return;
+      }
+      if (res && res.roomId) {
+        currentRoomId = res.roomId;
+        saveSession(res.roomId, res.token || "", myName);
+        if ($("roomBadge")) {
+          $("roomBadge").classList.remove("hidden");
+          $("roomBadge").textContent = currentRoomId;
+        }
+      }
+    });
+  };
+}
 
-$("joinBtn").onclick = () => {
-  myName = $("nameInput").value.trim() || "لاعب";
-  const roomId = $("roomInput").value.trim().toUpperCase();
-  if (!roomId) return ($("landingError").textContent = "أدخل رمز الغرفة");
-  socket.emit("joinRoom", { roomId, name: myName }, (res) => {
-    if (res.error) return ($("landingError").textContent = res.error);
-    currentRoomId = res.roomId;
-    saveSession(res.roomId, res.token, myName);
-    $("roomBadge").classList.remove("hidden");
-    $("roomBadge").textContent = currentRoomId;
-  });
-};
+if ($("joinBtn")) {
+  $("joinBtn").onclick = () => {
+    myName = ($("nameInput") ? $("nameInput").value.trim() : "") || "لاعب";
+    const roomId = $("roomInput") ? $("roomInput").value.trim().toUpperCase() : "";
+    if (!roomId) {
+      if ($("landingError")) $("landingError").textContent = "أدخل رمز الغرفة";
+      return;
+    }
+    socket.emit("joinRoom", { roomId, playerName: myName, name: myName }, (res) => {
+      if (res && res.error) {
+        if ($("landingError")) $("landingError").textContent = res.error;
+        return;
+      }
+      currentRoomId = roomId;
+      if (res && res.token) saveSession(roomId, res.token, myName);
+      if ($("roomBadge")) {
+        $("roomBadge").classList.remove("hidden");
+        $("roomBadge").textContent = currentRoomId;
+      }
+    });
+  };
+}
+
+// ---------- استقبال أحداث الإنشاء والانضمام المباشرة ----------
+socket.on("roomCreated", (data) => {
+  if (data && data.roomId) {
+    currentRoomId = data.roomId;
+    if ($("roomBadge")) {
+      $("roomBadge").classList.remove("hidden");
+      $("roomBadge").textContent = currentRoomId;
+    }
+    show("lobby");
+  }
+});
+
+socket.on("error", (msg) => {
+  if ($("landingError")) $("landingError").textContent = msg;
+  if ($("lobbyError")) $("lobbyError").textContent = msg;
+});
 
 // ---------- اختيار الفريق والدور ----------
 document.querySelectorAll(".role-btn").forEach((btn) => {
   btn.onclick = () => {
     socket.emit("setTeamRole", { team: btn.dataset.team, role: btn.dataset.role }, (res) => {
-      if (res.error) $("lobbyError").textContent = res.error;
-      else $("lobbyError").textContent = "";
+      if (res && res.error && $("lobbyError")) $("lobbyError").textContent = res.error;
+      else if ($("lobbyError")) $("lobbyError").textContent = "";
     });
   };
 });
 
 // ---------- إعدادات المضيف ----------
-$("categorySelect").onchange = (e) => {
-  selectedCategory = e.target.value;
-  $("customWordsBox").classList.toggle("hidden", selectedCategory !== "custom");
-  pushSettings();
-};
-$("customWordsBox").addEventListener("blur", () => pushSettings());
+if ($("categorySelect")) {
+  $("categorySelect").onchange = (e) => {
+    selectedCategory = e.target.value;
+    if ($("customWordsBox")) $("customWordsBox").classList.toggle("hidden", selectedCategory !== "custom");
+    pushSettings();
+  };
+}
+if ($("customWordsBox")) {
+  $("customWordsBox").addEventListener("blur", () => pushSettings());
+}
 document.querySelectorAll(".timer-btn").forEach((btn) => {
   btn.onclick = () => {
     selectedTimer = btn.dataset.timer;
@@ -108,26 +151,35 @@ function pushSettings() {
   socket.emit("updateSettings", {
     category: selectedCategory,
     timerMode: selectedTimer,
-    customWords: $("customWordsBox").value,
+    customWords: $("customWordsBox") ? $("customWordsBox").value : "",
   }, () => {});
 }
 
-$("startBtn").onclick = () => {
-  socket.emit("startGame", {}, (res) => {
-    if (res.error) $("lobbyError").textContent = res.error;
-  });
-};
+if ($("startBtn")) {
+  $("startBtn").onclick = () => {
+    socket.emit("startGame", {}, (res) => {
+      if (res && res.error && $("lobbyError")) $("lobbyError").textContent = res.error;
+    });
+  };
+}
 
 // ---------- التلميح والكشف ----------
-$("giveClueBtn").onclick = () => {
-  const word = $("clueWord").value.trim();
-  const count = parseInt($("clueCount").value, 10);
-  if (!word || isNaN(count)) return;
-  socket.emit("giveClue", { word, count }, (res) => {
-    if (!res.error) { $("clueWord").value = ""; $("clueCount").value = ""; }
-  });
-};
-$("endTurnBtn").onclick = () => socket.emit("endTurn", {});
+if ($("giveClueBtn")) {
+  $("giveClueBtn").onclick = () => {
+    const word = $("clueWord") ? $("clueWord").value.trim() : "";
+    const count = parseInt($("clueCount") ? $("clueCount").value : "0", 10);
+    if (!word || isNaN(count)) return;
+    socket.emit("giveClue", { word, count }, (res) => {
+      if (res && !res.error) { 
+        if ($("clueWord")) $("clueWord").value = ""; 
+        if ($("clueCount")) $("clueCount").value = ""; 
+      }
+    });
+  };
+}
+if ($("endTurnBtn")) {
+  $("endTurnBtn").onclick = () => socket.emit("endTurn", {});
+}
 
 // ---------- ردود الفعل العائمة ----------
 document.querySelectorAll(".reaction-btn").forEach((btn) => {
@@ -135,6 +187,7 @@ document.querySelectorAll(".reaction-btn").forEach((btn) => {
 });
 function spawnFloatingEmoji(emoji) {
   const layer = $("floatingLayer");
+  if (!layer) return;
   const el = document.createElement("div");
   el.className = "floating-emoji";
   el.textContent = emoji;
@@ -145,15 +198,20 @@ function spawnFloatingEmoji(emoji) {
 let lastReactionId = null;
 
 // ---------- سجل الحركات ----------
-$("historyBtn").onclick = () => $("historyPanel").classList.remove("hidden");
-$("closeHistory").onclick = () => $("historyPanel").classList.add("hidden");
+if ($("historyBtn")) $("historyBtn").onclick = () => { if ($("historyPanel")) $("historyPanel").classList.remove("hidden"); };
+if ($("closeHistory")) $("closeHistory").onclick = () => { if ($("historyPanel")) $("historyPanel").classList.add("hidden"); };
 
 // ---------- إعادة اللعب ----------
-$("rematchSameBtn").onclick = () => socket.emit("rematch", { mode: "same_teams" }, () => {});
-$("rematchNewBtn").onclick = () => socket.emit("rematch", { mode: "new_teams" }, () => {});
+if ($("rematchSameBtn")) $("rematchSameBtn").onclick = () => socket.emit("rematch", { mode: "same_teams" }, () => {});
+if ($("rematchNewBtn")) $("rematchNewBtn").onclick = () => socket.emit("rematch", { mode: "new_teams" }, () => {});
 
 // ---------- استقبال حالة الغرفة ----------
 socket.on("roomState", (state) => {
+  lastState = state;
+  render(state);
+});
+
+socket.on("gameStateUpdate", (state) => {
   lastState = state;
   render(state);
 });
@@ -166,16 +224,16 @@ function fmtTime(ms) {
 }
 
 function render(state) {
-  if (state.phase === "lobby") renderLobby(state);
+  if (!state) return;
+  if (state.phase === "lobby" || !state.phase) renderLobby(state);
   else if (state.phase === "playing") renderGame(state);
   else if (state.phase === "ended") renderEnded(state);
 
-  // ردود الفعل العائمة الجديدة
   if (state.reactions && state.reactions.length) {
     const last = state.reactions[state.reactions.length - 1];
     if (last.id !== lastReactionId) {
       lastReactionId = last.id;
-      if (document.getElementById("game").classList.contains("hidden") === false) {
+      if ($("game") && !$("game").classList.contains("hidden")) {
         spawnFloatingEmoji(last.emoji);
       }
     }
@@ -187,51 +245,62 @@ function renderLobby(state) {
   clearInterval(timerInterval);
 
   const redList = $("redPlayers"), blueList = $("bluePlayers");
-  redList.innerHTML = ""; blueList.innerHTML = "";
-  Object.values(state.players).forEach((p) => {
-    const label = `${p.name} ${p.role === "spymaster" ? "🧠" : p.role === "operative" ? "🎯" : ""}${p.connected ? "" : " (غير متصل)"}`;
-    if (p.team === "red") redList.innerHTML += `<li>${label}</li>`;
-    else if (p.team === "blue") blueList.innerHTML += `<li>${label}</li>`;
+  if (redList) redList.innerHTML = ""; 
+  if (blueList) blueList.innerHTML = "";
+  
+  const players = state.players || {};
+  Object.values(players).forEach((p) => {
+    const label = `${p.name || p.playerName || "لاعب"} ${p.role === "spymaster" ? "🧠" : p.role === "operative" ? "🎯" : ""}${p.connected !== false ? "" : " (غير متصل)"}`;
+    if (p.team === "red" && redList) redList.innerHTML += `<li>${label}</li>`;
+    else if (p.team === "blue" && blueList) blueList.innerHTML += `<li>${label}</li>`;
   });
 
   document.querySelectorAll(".role-btn").forEach((btn) => {
-    const isMine = state.you.team === btn.dataset.team && state.you.role === btn.dataset.role;
+    const you = state.you || {};
+    const isMine = you.team === btn.dataset.team && you.role === btn.dataset.role;
     btn.classList.toggle("active-red", isMine && btn.dataset.team === "red");
     btn.classList.toggle("active-blue", isMine && btn.dataset.team === "blue");
   });
 
-  $("hostSettings").classList.toggle("hidden", !state.you.isHost);
-  if (state.you.isHost) {
-    $("categorySelect").value = state.settings.category;
-    selectedCategory = state.settings.category;
-    $("customWordsBox").classList.toggle("hidden", selectedCategory !== "custom");
-    document.querySelectorAll(".timer-btn").forEach((b) => b.classList.toggle("active", b.dataset.timer === state.settings.timerMode));
-    selectedTimer = state.settings.timerMode;
+  const you = state.you || {};
+  if ($("hostSettings")) $("hostSettings").classList.toggle("hidden", !you.isHost);
+  if (you.isHost && state.settings) {
+    if ($("categorySelect")) $("categorySelect").value = state.settings.category || "beginner";
+    selectedCategory = state.settings.category || "beginner";
+    if ($("customWordsBox")) $("customWordsBox").classList.toggle("hidden", selectedCategory !== "custom");
+    document.querySelectorAll(".timer-btn").forEach((b) => b.classList.toggle("active", b.dataset.timer === (state.settings.timerMode || "none")));
+    selectedTimer = state.settings.timerMode || "none";
   }
 
   const counts = { red: { spymaster: 0, operative: 0 }, blue: { spymaster: 0, operative: 0 } };
-  Object.values(state.players).forEach((p) => { if (p.team && p.role) counts[p.team][p.role]++; });
-  const ready = counts.red.spymaster === 1 && counts.blue.spymaster === 1 && counts.red.operative >= 1 && counts.blue.operative >= 1;
+  Object.values(players).forEach((p) => { if (p.team && p.role && counts[p.team] && counts[p.team][p.role] !== undefined) counts[p.team][p.role]++; });
+  const ready = counts.red.spymaster >= 1 && counts.blue.spymaster >= 1 && counts.red.operative >= 1 && counts.blue.operative >= 1;
 
-  $("startBtn").classList.toggle("hidden", !state.you.isHost);
-  $("startBtn").disabled = !ready;
-  $("lobbyStatus").textContent = ready
-    ? "الفرق جاهزة — يمكن للمضيف بدء اللعبة"
-    : "يجب توفر مُلمّح واحد وعميل ميداني واحد على الأقل لكل فريق (4 لاعبين كحد أدنى)";
+  if ($("startBtn")) {
+    $("startBtn").classList.toggle("hidden", !you.isHost);
+    $("startBtn").disabled = !ready;
+  }
+  if ($("lobbyStatus")) {
+    $("lobbyStatus").textContent = ready
+      ? "الفرق جاهزة — يمكن للمضيف بدء اللعبة"
+      : "يجب توفر مُلمّح واحد وعميل ميداني واحد على الأقل لكل فريق (4 لاعبين كحد أدنى)";
+  }
 }
 
 function renderGame(state) {
   show("game");
-  const me = state.you;
+  const me = state.you || {};
   const isSpymasterTurn = me.role === "spymaster" && me.team === state.turn && state.turnPhase === "clue";
   const isOperativeTurn = me.role === "operative" && me.team === state.turn && state.turnPhase === "guess";
 
-  $("turnIndicator").textContent = `دور فريق ${state.turn === "red" ? "الأحمر 🔴" : "الأزرق 🔵"} — ${state.turnPhase === "clue" ? "بانتظار التلميح" : "بانتظار الاختيار"}`;
-  $("scoreRed").textContent = state.scores.red;
-  $("scoreBlue").textContent = state.scores.blue;
+  if ($("turnIndicator")) {
+    $("turnIndicator").textContent = `دور فريق ${state.turn === "red" ? "الأحمر 🔴" : "الأزرق 🔵"} — ${state.turnPhase === "clue" ? "بانتظار التلميح" : "بانتظار الاختيار"}`;
+  }
+  if ($("scoreRed") && state.scores) $("scoreRed").textContent = state.scores.red || 0;
+  if ($("scoreBlue") && state.scores) $("scoreBlue").textContent = state.scores.blue || 0;
 
   clearInterval(timerInterval);
-  if (state.turnDeadline) {
+  if (state.turnDeadline && $("timerPill")) {
     $("timerPill").classList.remove("hidden");
     const tick = () => {
       const remain = state.turnDeadline - Date.now();
@@ -240,57 +309,67 @@ function renderGame(state) {
     };
     tick();
     timerInterval = setInterval(tick, 500);
-  } else {
+  } else if ($("timerPill")) {
     $("timerPill").classList.add("hidden");
   }
 
-  if (state.currentClue) {
+  if (state.currentClue && $("clueBar")) {
     $("clueBar").classList.remove("hidden");
-    const remaining = state.currentClue.count - state.currentClue.revealedCount;
+    const remaining = state.currentClue.count - (state.currentClue.revealedCount || 0);
     $("clueBar").textContent = `التلميح: "${state.currentClue.word}" (${state.currentClue.count}) — تبقّى ${remaining} للفريق`;
-  } else {
+  } else if ($("clueBar")) {
     $("clueBar").classList.add("hidden");
   }
 
-  $("clueForm").classList.toggle("hidden", !isSpymasterTurn);
-  $("endTurnBtn").classList.toggle("hidden", !isOperativeTurn);
-  $("reactionsRow").querySelectorAll(".reaction-btn").forEach(b => b.classList.remove("hidden"));
+  if ($("clueForm")) $("clueForm").classList.toggle("hidden", !isSpymasterTurn);
+  if ($("endTurnBtn")) $("endTurnBtn").classList.toggle("hidden", !isOperativeTurn);
 
   const board = $("board");
-  board.innerHTML = "";
-  state.board.forEach((cell, i) => {
-    const div = document.createElement("div");
-    div.className = "cell";
-    div.textContent = cell.word;
-    if (cell.revealed) {
-      div.classList.add("revealed", `color-${cell.color}`);
-    } else if (me.role === "spymaster" && cell.color) {
-      if (cell.color !== "neutral") div.classList.add(`spy-hint-${cell.color}`);
-    }
-    if (!cell.revealed && isOperativeTurn) {
-      div.onclick = () => socket.emit("revealWord", { index: i }, () => {});
-    }
-    board.appendChild(div);
-  });
+  if (board) {
+    board.innerHTML = "";
+    (state.board || []).forEach((cell, i) => {
+      const div = document.createElement("div");
+      div.className = "cell";
+      div.textContent = cell.word;
+      if (cell.revealed) {
+        div.classList.add("revealed", `color-${cell.color}`);
+      } else if (me.role === "spymaster" && cell.color) {
+        if (cell.color !== "neutral") div.classList.add(`spy-hint-${cell.color}`);
+      }
+      if (!cell.revealed && isOperativeTurn) {
+        div.onclick = () => socket.emit("revealWord", { index: i }, () => {});
+      }
+      board.appendChild(div);
+    });
+  }
 
-  $("log").innerHTML = state.log.map((l) => `<div>${l.text}</div>`).join("");
+  if ($("log")) {
+    $("log").innerHTML = (state.log || []).map((l) => `<div>${l.text || l}</div>`).join("");
+  }
 }
 
 function renderEnded(state) {
   show("ended");
   clearInterval(timerInterval);
-  $("winnerTeamText").textContent = `فاز فريق ${state.winner === "red" ? "الأحمر 🔴" : "الأزرق 🔵"}`;
-  $("winBadge").style.setProperty("--w", state.winner === "red" ? "var(--red)" : "var(--blue)");
+  if ($("winnerTeamText")) {
+    $("winnerTeamText").textContent = `فاز فريق ${state.winner === "red" ? "الأحمر 🔴" : "الأزرق 🔵"}`;
+  }
+  if ($("winBadge")) {
+    $("winBadge").style.setProperty("--w", state.winner === "red" ? "var(--red)" : "var(--blue)");
+  }
 
   const board = $("finalBoard");
-  board.innerHTML = "";
-  state.board.forEach((cell) => {
-    const div = document.createElement("div");
-    div.className = `cell revealed color-${cell.color || "neutral"}`;
-    div.textContent = cell.word;
-    board.appendChild(div);
-  });
+  if (board) {
+    board.innerHTML = "";
+    (state.board || []).forEach((cell) => {
+      const div = document.createElement("div");
+      div.className = `cell revealed color-${cell.color || "neutral"}`;
+      div.textContent = cell.word;
+      board.appendChild(div);
+    });
+  }
 
-  $("rematchButtons").classList.toggle("hidden", !state.you.isHost);
-  $("waitHostText").classList.toggle("hidden", !!state.you.isHost);
+  const you = state.you || {};
+  if ($("rematchButtons")) $("rematchButtons").classList.toggle("hidden", !you.isHost);
+  if ($("waitHostText")) $("waitHostText").classList.toggle("hidden", !!you.isHost);
 }
