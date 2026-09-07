@@ -52,27 +52,49 @@ app.get('/health', (req, res) => {
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
-  socket.on('createRoom', ({ playerName }) => {
-    if (!GameEngine) return;
+  socket.on('createRoom', (data, callback) => {
+    const playerName = (data && (data.playerName || data.name)) || "لاعب";
     const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
-    rooms[roomId] = new GameEngine(roomId, wordBank);
+    
+    if (GameEngine) {
+      rooms[roomId] = new GameEngine(roomId, wordBank);
+      rooms[roomId].addPlayer(socket.id, playerName);
+    }
     
     socket.join(roomId);
-    rooms[roomId].addPlayer(socket.id, playerName);
     
-    socket.emit('roomCreated', { roomId, gameState: rooms[roomId].getState(), playerId: socket.id });
+    const response = { 
+      roomId, 
+      token: socket.id, 
+      playerName, 
+      gameState: rooms[roomId] ? rooms[roomId].getState() : {} 
+    };
+    
+    if (typeof callback === 'function') callback(response);
+    socket.emit('roomCreated', response);
+    
     console.log(`Room ${roomId} created by ${playerName}`);
   });
 
-  socket.on('joinRoom', ({ roomId, playerName }) => {
+  socket.on('joinRoom', (data, callback) => {
+    const roomId = data && data.roomId ? data.roomId.toUpperCase() : null;
+    const playerName = (data && (data.playerName || data.name)) || "لاعب";
+    
     const room = rooms[roomId];
     if (!room) {
+      const err = { error: 'الغرفة غير موجودة' };
+      if (typeof callback === 'function') callback(err);
       socket.emit('error', 'الغرفة غير موجودة');
       return;
     }
+    
     socket.join(roomId);
     room.addPlayer(socket.id, playerName);
-    io.to(roomId).emit('gameStateUpdate', room.getState());
+    
+    const response = { roomId, token: socket.id, playerName };
+    if (typeof callback === 'function') callback(response);
+    
+    io.to(roomId).emit('roomState', room.getState ? room.getState() : {});
   });
 
   socket.on('disconnect', () => {
