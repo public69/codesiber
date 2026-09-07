@@ -17,8 +17,7 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 3000;
 
 // إعداد خادم الملفات الثابتة من مجلد public
-app.use(express.static(path.join(__dirname, 'public')));
-
+app.use(express.static(__dirname));
 // تحميل بنك الكلمات من ملف words-bank.json
 let wordBank = [];
 try {
